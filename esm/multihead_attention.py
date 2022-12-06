@@ -81,9 +81,9 @@ class MultiheadAttention(nn.Module):
         bias=True,
         add_bias_kv: bool = False,
         add_zero_attn: bool = False,
-        self_attention: bool = False,
+        self_attention: bool = False, ### q=k=v
         encoder_decoder_attention: bool = False,
-        use_rotary_embeddings: bool = False,
+        use_rotary_embeddings: bool = False, ### True
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -115,7 +115,7 @@ class MultiheadAttention(nn.Module):
         if add_bias_kv:
             self.bias_k = Parameter(torch.Tensor(1, 1, embed_dim))
             self.bias_v = Parameter(torch.Tensor(1, 1, embed_dim))
-        else:
+        else: ###
             self.bias_k = self.bias_v = None
 
         self.add_zero_attn = add_zero_attn
@@ -125,7 +125,7 @@ class MultiheadAttention(nn.Module):
         self.onnx_trace = False
         self.rot_emb = None
         if use_rotary_embeddings:
-            self.rot_emb = RotaryEmbedding(dim=self.head_dim)
+            self.rot_emb = RotaryEmbedding(dim=self.head_dim) ###
 
         self.enable_torch_version = False
         if hasattr(F, "multi_head_attention_forward"):
@@ -194,7 +194,7 @@ class MultiheadAttention(nn.Module):
         assert list(query.size()) == [tgt_len, bsz, embed_dim]
 
         if (
-            not self.rot_emb
+            not self.rot_emb ### not True -> False
             and self.enable_torch_version
             and not self.onnx_trace
             and incremental_state is None
@@ -236,7 +236,7 @@ class MultiheadAttention(nn.Module):
                 if static_kv:
                     assert self.encoder_decoder_attention and not self.self_attention
                     key = value = None
-        else:
+        else: ### incremental_state is None
             saved_state = None
 
         if self.self_attention:
@@ -253,14 +253,14 @@ class MultiheadAttention(nn.Module):
                 k = self.k_proj(key)
                 v = self.v_proj(key)
 
-        else:
+        else: ### query=key=value=x -> self.attention
             assert key is not None and value is not None
             q = self.q_proj(query)
             k = self.k_proj(key)
             v = self.v_proj(value)
         q *= self.scaling
 
-        if self.bias_k is not None:
+        if self.bias_k is not None: ### self.bias_k is None
             assert self.bias_v is not None
             k = torch.cat([k, self.bias_k.repeat(1, bsz, 1)])
             v = torch.cat([v, self.bias_v.repeat(1, bsz, 1)])
@@ -283,7 +283,7 @@ class MultiheadAttention(nn.Module):
         if v is not None:
             v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)
 
-        if saved_state is not None:
+        if saved_state is not None: ### saved_state is None
             # saved states are stored with shape (bsz, num_heads, seq_len, head_dim)
             if "prev_key" in saved_state:
                 _prev_key = saved_state["prev_key"]
@@ -329,11 +329,11 @@ class MultiheadAttention(nn.Module):
         if key_padding_mask is not None and key_padding_mask.dim() == 0:
             key_padding_mask = None
 
-        if key_padding_mask is not None:
+        if key_padding_mask is not None: ### padding_mask = tokens.eq(self.padding_idx) https://github.com/a96123155/esm/blob/839c5b82c6cd9e18baa7a88dcbed3bd4b6d48e47/esm/model/esm2.py#L82
             assert key_padding_mask.size(0) == bsz
             assert key_padding_mask.size(1) == src_len
 
-        if self.add_zero_attn:
+        if self.add_zero_attn: ### False
             assert v is not None
             src_len += 1
             k = torch.cat([k, k.new_zeros((k.size(0), 1) + k.size()[2:])], dim=1)
@@ -351,7 +351,7 @@ class MultiheadAttention(nn.Module):
                     dim=1,
                 )
 
-        if self.rot_emb:
+        if self.rot_emb: ### True
             q, k = self.rot_emb(q, k)
 
         attn_weights = torch.bmm(q, k.transpose(1, 2))
@@ -359,13 +359,13 @@ class MultiheadAttention(nn.Module):
 
         assert list(attn_weights.size()) == [bsz * self.num_heads, tgt_len, src_len]
 
-        if attn_mask is not None:
+        if attn_mask is not None: ### None
             attn_mask = attn_mask.unsqueeze(0)
             if self.onnx_trace:
                 attn_mask = attn_mask.repeat(attn_weights.size(0), 1, 1)
             attn_weights += attn_mask
 
-        if key_padding_mask is not None:
+        if key_padding_mask is not None: ### not None
             # don't attend to padding symbols
             attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
             attn_weights = attn_weights.masked_fill(
@@ -373,28 +373,28 @@ class MultiheadAttention(nn.Module):
             )
             attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
 
-        if before_softmax:
+        if before_softmax: # False
             return attn_weights, v
 
         attn_weights_float = utils_softmax(attn_weights, dim=-1, onnx_trace=self.onnx_trace)
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = F.dropout(
             attn_weights_float.type_as(attn_weights),
-            p=self.dropout,
+            p=self.dropout, ### 0.0 -> No dropout
             training=self.training,
         )
         assert v is not None
-        attn = torch.bmm(attn_probs, v)
+        attn = torch.bmm(attn_probs, v) # input（p,m,n) * mat2(p,n,a) -> output(p,m,a)
         assert list(attn.size()) == [bsz * self.num_heads, tgt_len, self.head_dim]
-        if self.onnx_trace and attn.size(1) == 1:
+        if self.onnx_trace and attn.size(1) == 1: ### False and != 1
             # when ONNX tracing a single decoder step (sequence length == 1)
             # the transpose is a no-op copy before view, thus unnecessary
             attn = attn.contiguous().view(tgt_len, bsz, embed_dim)
         else:
-            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim)
-        attn = self.out_proj(attn)
+            attn = attn.transpose(0, 1).contiguous().view(tgt_len, bsz, embed_dim) ### 
+        attn = self.out_proj(attn) ### self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         attn_weights: Optional[Tensor] = None
-        if need_weights:
+        if need_weights: ### True
             attn_weights = attn_weights_float.view(
                 bsz, self.num_heads, tgt_len, src_len
             ).type_as(attn).transpose(1, 0)
@@ -402,7 +402,7 @@ class MultiheadAttention(nn.Module):
                 # average attention weights over heads
                 attn_weights = attn_weights.mean(dim=0)
 
-        return attn, attn_weights
+        return attn, attn_weights ### x, attn https://github.com/a96123155/esm/blob/839c5b82c6cd9e18baa7a88dcbed3bd4b6d48e47/esm/modules.py#L124
 
     @staticmethod
     def _append_prev_key_padding_mask(
